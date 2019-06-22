@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
 
-	"github.com/docker/docker/api/types/filters"
-
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/pkg/errors"
 )
@@ -19,12 +19,101 @@ import (
 type Container struct {
 	ID   string
 	Name string
+
+	Volumes Volumes
+}
+
+func (c *Container) String() string {
+	return fmt.Sprintf(
+		"{ID: %s.., Name: %s}",
+		c.ID[:8],
+		c.Name,
+	)
+}
+
+// Equals returns true if the container has the same ID.
+func (c *Container) Equals(other *Container) bool {
+	if c.ID == other.ID {
+		return true
+	}
+	return false
+}
+
+// ContainerList is a list of Containers.
+type ContainerList struct {
+	list []*Container // Container list.
+	mux  sync.RWMutex // Protects this list.
+}
+
+// NewContainerList returns a new empty list.
+func NewContainerList() *ContainerList {
+	list := &ContainerList{
+		list: make([]*Container, 0),
+	}
+	return list
+}
+
+func (l *ContainerList) String() string {
+	ss := make([]string, len(l.list))
+	for k, v := range l.list {
+		ss[k] = v.String()
+	}
+	return strings.TrimSpace(strings.Join(ss, " "))
+}
+
+// Upsert inserts a container to the list in case it doesn't exist. If it does
+// exist it updates the item in the list.
+func (l *ContainerList) Upsert(c *Container) {
+	l.mux.Lock()
+	defer l.mux.Unlock()
+	for k, v := range l.list {
+		if v.Equals(c) {
+			l.list[k] = c
+			return
+		}
+	}
+	l.list = append(l.list, c)
+}
+
+// Remove container with specified ID.
+func (l *ContainerList) Remove(id string) {
+	l.mux.Lock()
+	defer l.mux.Unlock()
+	// Get index of container by ID.
+	for k, v := range l.list {
+		if v.ID != id {
+			continue
+		}
+		// Order is not important so we can swap the last element with the one
+		// removed and shorten the slice.
+		l.list[k] = l.list[len(l.list)-1]
+		l.list = l.list[:len(l.list)-1]
+		return
+	}
+	// Remove is idempotent.
+}
+
+// Len returns the lenght of the list.
+func (l *ContainerList) Len() int {
+	l.mux.RLock()
+	defer l.mux.RUnlock()
+	return len(l.list)
+}
+
+// Volumes is a list of Volumes.
+type Volumes []*Volume
+
+// Volume is a container volume.
+type Volume struct {
+	ID      string
+	SrcPath string
+	DstPath string
 }
 
 // Dockwatch interfaces with Docker API.
 type Dockwatch struct {
 	Client *client.Client // The Docker API client.
-	list   []Container    // A list of containers to watch and update.
+	list   *ContainerList // A list of containers to watch and update.
 	cmux   sync.RWMutex   // Protects Containers.
 
 	ctx    context.Context
@@ -38,38 +127,35 @@ func NewDockwatch(ctx context.Context) (*Dockwatch, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "could not create docker api client")
 	}
-	w := &Dockwatch{
+	d := &Dockwatch{
 		Client: cli,
-		list:   make([]Container, 0),
+		list:   NewContainerList(),
 		ctx:    ctx,
 	}
+
+	d.initEventListeners()
+	return d, nil
+}
+
+// initEventListeners listens to Docker daemon events.
+func (d *Dockwatch) initEventListeners() {
 	args := filters.NewArgs()
 	args.Add("type", "container")
-	w.events, w.errors = cli.Events(ctx, types.EventsOptions{
+	d.events, d.errors = d.Client.Events(d.ctx, types.EventsOptions{
 		Filters: args,
 	})
-
-	return w, nil
+	log.Println("event listeners started")
 }
 
 func (d *Dockwatch) String() string {
-	var buf strings.Builder
-	for k, v := range d.list {
-		buf.WriteString(fmt.Sprintf(
-			"[%d] %s %s\n",
-			k,
-			v.ID,
-			v.Name,
-		))
-	}
-	return buf.String()
+	return d.list.String()
 }
 
 // WatchContainer keeps an internally updated list of running containers. It
 // watches Docker events.
 func (d *Dockwatch) WatchContainer() error {
 	ctx := d.ctx
-	if len(d.list) == 0 {
+	if d.list.Len() == 0 {
 		// We started just now so the list is empty. Get all containers running
 		// now and matching the name.
 		if err := d.resetContainerList(); err != nil {
@@ -83,13 +169,21 @@ func (d *Dockwatch) WatchContainer() error {
 		for {
 			select {
 			case ev := <-d.events:
+				log.Printf("got event from Docker: %s %s", ev.Action, ev.Actor.ID)
 				d.handleEvent(ev)
 			case err := <-d.errors:
+				if err == io.EOF {
+					// Reinit the event stream.
+					log.Printf("got EOF on error channel of docker events: %v", err)
+					d.initEventListeners()
+				}
+				// Handle other errors.
 				d.handleErrors(err)
 			case <-ctx.Done():
-				// We're done here
 				return
 			}
+
+			log.Println(d.list)
 		}
 	}()
 
@@ -107,46 +201,13 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 
 	switch ev.Action {
 	case "start", "unpause":
-		d.addToList(ev.Actor.ID, ev.Actor.Attributes["name"])
-	case "stop", "kill", "die", "pause":
-		d.removeFromList(ev.Actor.ID)
+		d.list.Upsert(&Container{
+			ID:   ev.Actor.ID,
+			Name: ev.Actor.Attributes["name"],
+		})
+	case "stop", "kill", "die", "pause", "destroy":
+		d.list.Remove(ev.Actor.ID)
 	}
-
-	fmt.Printf("list: %+v\n", d.list)
-}
-
-// addToList add a container id to the watched list.
-func (d *Dockwatch) addToList(containerID string, name string) {
-	d.cmux.Lock()
-	defer d.cmux.Unlock()
-
-	for _, v := range d.list {
-		if v.ID == containerID {
-			return
-		}
-	}
-
-	d.list = append(d.list, Container{
-		ID:   containerID,
-		Name: name,
-	})
-}
-
-func (d *Dockwatch) removeFromList(containerID string) {
-	d.cmux.Lock()
-	defer d.cmux.Unlock()
-
-	list := make([]Container, len(d.list)-1)
-
-	var i int
-	for _, v := range d.list {
-		if v.ID == containerID {
-			continue
-		}
-		list[i] = v
-		i++
-	}
-	d.list = list
 }
 
 // handleErrors .
@@ -166,11 +227,13 @@ func (d *Dockwatch) resetContainerList() error {
 	}
 
 	for _, v := range list {
-		d.list = append(d.list, Container{
+		d.list.Upsert(&Container{
 			ID:   v.ID,
 			Name: strings.TrimSpace(strings.Join(v.Names, " ")),
 		})
 	}
 
+	log.Println("reset container list:")
+	log.Println(d.list)
 	return nil
 }

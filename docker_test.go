@@ -32,7 +32,7 @@ func TestDockwatch_WatchContainer(t *testing.T) {
 			if err := tt.d.WatchContainer(); (err != nil) != tt.wantErr {
 				t.Errorf("Dockwatch.WatchContainer() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			t.Logf("found %d containers", len(tt.d.list))
+			t.Logf("found %d containers", tt.d.list.Len())
 		})
 	}
 }
