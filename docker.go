@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/pkg/errors"
 )
@@ -20,14 +21,15 @@ type Container struct {
 	ID   string
 	Name string
 
-	Volumes Volumes
+	Mounts []*Mount
 }
 
 func (c *Container) String() string {
 	return fmt.Sprintf(
-		"{ID: %s.., Name: %s}",
+		"{ID: %s.., Name: %s, Mounts: %v}",
 		c.ID[:8],
 		c.Name,
+		c.Mounts,
 	)
 }
 
@@ -100,21 +102,23 @@ func (l *ContainerList) Len() int {
 	return len(l.list)
 }
 
-// Volumes is a list of Volumes.
-type Volumes []*Volume
+// Reset clears the list without deallocating memory.
+func (l *ContainerList) Reset() {
+	l.mux.Lock()
+	defer l.mux.Unlock()
+	l.list = l.list[:0]
+}
 
-// Volume is a container volume.
-type Volume struct {
-	ID      string
-	SrcPath string
-	DstPath string
+// Mount is a bind-mount into a container.
+type Mount struct {
+	SrcPath string // Source path on the host.
+	DstPath string // Destination bind-mount path in the container.
 }
 
 // Dockwatch interfaces with Docker API.
 type Dockwatch struct {
 	Client *client.Client // The Docker API client.
 	list   *ContainerList // A list of containers to watch and update.
-	cmux   sync.RWMutex   // Protects Containers.
 
 	ctx    context.Context
 	events <-chan events.Message
@@ -201,9 +205,15 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 
 	switch ev.Action {
 	case "start", "unpause":
+		mounts, err := d.getMounts(d.ctx, ev.Actor.ID)
+		if err != nil {
+			log.Printf("could not inspect mounts: %v", err)
+			mounts = make([]*Mount, 0)
+		}
 		d.list.Upsert(&Container{
-			ID:   ev.Actor.ID,
-			Name: ev.Actor.Attributes["name"],
+			ID:     ev.Actor.ID,
+			Name:   ev.Actor.Attributes["name"],
+			Mounts: mounts,
 		})
 	case "stop", "kill", "die", "pause", "destroy":
 		d.list.Remove(ev.Actor.ID)
@@ -218,22 +228,45 @@ func (d *Dockwatch) handleErrors(err error) {
 // resetContainerList updates the internal list. It deletes all current entries
 // and fetches a fresh list from the Docker daemon.
 func (d *Dockwatch) resetContainerList() error {
-	d.cmux.Lock()
-	defer d.cmux.Unlock()
-
+	d.list.Reset()
 	list, err := d.Client.ContainerList(d.ctx, types.ContainerListOptions{})
 	if err != nil {
 		return errors.Wrap(err, "could not fetch fresh container list")
 	}
 
 	for _, v := range list {
+		mounts, err := d.getMounts(d.ctx, v.ID)
+		if err != nil {
+			return errors.Wrap(err, "could not inspect mounts")
+		}
+
 		d.list.Upsert(&Container{
-			ID:   v.ID,
-			Name: strings.TrimSpace(strings.Join(v.Names, " ")),
+			ID:     v.ID,
+			Name:   strings.TrimSpace(strings.Join(v.Names, " ")),
+			Mounts: mounts,
 		})
 	}
 
 	log.Println("reset container list:")
 	log.Println(d.list)
 	return nil
+}
+
+// getMounts .
+func (d *Dockwatch) getMounts(ctx context.Context, containerID string) ([]*Mount, error) {
+	mounts := make([]*Mount, 0)
+	mm, err := d.Client.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not inspect container %s", containerID)
+	}
+	for _, v := range mm.Mounts {
+		if v.Type == mount.TypeBind && v.RW {
+			// We only consider writable AND readable bind-mounts.
+			mounts = append(mounts, &Mount{
+				SrcPath: v.Source,
+				DstPath: v.Destination,
+			})
+		}
+	}
+	return mounts, nil
 }
