@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -245,23 +246,45 @@ func (d *Dockwatch) ForwardChange(path string) error {
 			}
 			dst := v.DstPath + p
 
+			// Prepare the "docker exec" command.
 			cmd := []string{
-				fmt.Sprintf(`perms = stat -c %%a %s`, dst),
-				"&&",
-				fmt.Sprintf(`chmod $perms %s`, dst),
+				"sh",
+				"-c",
+				fmt.Sprintf(`chmod $(stat -c %%a %s) %s`, dst, dst),
 			}
 			execCfg := types.ExecConfig{
-				Cmd: cmd,
+				Cmd:          cmd,
+				Tty:          false,
+				AttachStdout: true,
+				AttachStderr: true,
 			}
 			id, err := d.Client.ContainerExecCreate(d.ctx, c.ID, execCfg)
 			if err != nil {
 				return errors.Wrapf(err, "cannot create exec in container %s", c.ID)
 			}
-			ctx, cancel := context.WithTimeout(d.ctx, time.Minute) // 1 min. should be more than enough.
+
+			// This timeout for the execution should be more than enough. If
+			// this takes longer we can assume there's a deeper problem present.
+			ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
 			defer cancel()
+
+			// During execution of the command attach a reader.
+			resp, err := d.Client.ContainerExecAttach(d.ctx, id.ID, execCfg)
+			if err != nil {
+				return errors.Wrapf(err, "cannot connect stderr/stdout to exec process")
+			}
+			defer resp.Close()
+
+			// Execute the "docker exec" command.
 			err = d.Client.ContainerExecStart(ctx, id.ID, types.ExecStartCheck{})
 			if err != nil {
 				return errors.Wrapf(err, "cannot start exec inside container %s", c.ID)
+			}
+
+			// Read back what happened.
+			scanner := bufio.NewScanner(resp.Reader)
+			for scanner.Scan() {
+				fmt.Println(scanner.Text())
 			}
 		}
 		return nil

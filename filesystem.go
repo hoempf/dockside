@@ -57,6 +57,14 @@ func (m *FileMonitor) Start(ctx context.Context) {
 				if !ok {
 					panic("TODO: implement")
 				}
+				if event.Op == fsnotify.Remove {
+					// File has been removed, so it can't be chmodded anymore.
+					// The container doesn't get the delete notification either
+					// though. We also can't create the same file and delete it
+					// in the container because it would most certainly cause an
+					// infinite loop.
+					continue
+				}
 				m.onChange(event.Name)
 			case err, ok := <-m.Watcher.Errors:
 				if !ok {
