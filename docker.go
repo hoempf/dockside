@@ -120,18 +120,18 @@ type Mount struct {
 	DstPath string // Destination bind-mount path in the container.
 }
 
-// OnStart is a function called when a container is started/unpaused etc.
-type OnStart func(*Container)
+// OnStartFunc is a function called when a container is started/unpaused etc.
+type OnStartFunc func(*Container)
 
-// OnStop is a function called when a container is stopped etc.
-type OnStop func(*Container)
+// OnStopFunc is a function called when a container is stopped etc.
+type OnStopFunc func(*Container)
 
 // Dockwatch interfaces with Docker API.
 type Dockwatch struct {
 	Client *client.Client // The Docker API client.
 
-	onStart OnStart // Callback when containers start.
-	onStop  OnStop  // Callback when containers stop.
+	onStart OnStartFunc // Callback when containers start.
+	onStop  OnStopFunc  // Callback when containers stop.
 
 	list   *ContainerList // A list of containers to watch and update.
 	ctx    context.Context
@@ -171,14 +171,14 @@ func (d *Dockwatch) String() string {
 
 // OnStart sets the callback function called when containers are started. We
 // make sure it is called only once per state transition.
-func (d *Dockwatch) OnStart(f OnStart) {
+func (d *Dockwatch) OnStart(f OnStartFunc) {
 	d.onStart = f
 }
 
 // OnStop sets the callback function called when containers are stopped. We make
 // sure it is called only once per state transition. E.g. `stop` followed by
 // `destroy` will only call this once.
-func (d *Dockwatch) OnStop(f OnStop) {
+func (d *Dockwatch) OnStop(f OnStopFunc) {
 	d.onStop = f
 }
 
@@ -242,11 +242,11 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 			Name:   ev.Actor.Attributes["name"],
 			Mounts: mounts,
 		})
-		if !updated {
+		if !updated && d.onStart != nil {
 			d.onStart(c)
 		}
 	case "stop", "kill", "die", "pause", "destroy":
-		if old := d.list.Remove(ev.Actor.ID); old != nil {
+		if old := d.list.Remove(ev.Actor.ID); old != nil && d.onStop != nil {
 			d.onStop(old)
 		}
 	}

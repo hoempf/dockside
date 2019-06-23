@@ -10,15 +10,31 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*10)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d, err := NewDockwatch(ctx)
 	if err != nil {
 		log.Fatalf("could create new dockwatch: %v", err)
 	}
 
+	fs, err := NewFileMonitor()
+	if err != nil {
+		log.Fatalf("could not start monitoring file system: %v", err)
+	}
+	defer fs.Close()
+	fs.OnChange(func(path string) {
+		log.Println("file changed", path)
+	})
+	fs.Start(ctx)
+
 	d.OnStart(func(c *Container) {
 		fmt.Println("container started", c)
+		// Get the mounts and start watching them.
+		for _, mount := range c.Mounts {
+			if err := fs.Watch(mount.SrcPath); err != nil {
+				log.Printf("error watching file %s: %v", mount.SrcPath, err)
+			}
+		}
 	})
 
 	d.OnStop(func(c *Container) {

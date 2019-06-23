@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"regexp"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
@@ -10,6 +15,8 @@ import (
 // FileMonitor is an abstraction struct for file system events.
 type FileMonitor struct {
 	Watcher *fsnotify.Watcher
+
+	onChange OnChangeFunc
 }
 
 // Prove FileMonitor is a Closer.
@@ -32,13 +39,57 @@ func (m *FileMonitor) Close() error {
 	return m.Watcher.Close()
 }
 
-// Start watching file system change events.
-func (m *FileMonitor) Start() {
+// OnChangeFunc is a function called when something in a file system we monitor
+// has changed.
+type OnChangeFunc func(path string)
 
+// OnChange is called when a file system object changes.
+func (m *FileMonitor) OnChange(f OnChangeFunc) {
+	m.onChange = f
+}
+
+// Start watching for file system notifications.
+func (m *FileMonitor) Start(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case event, ok := <-m.Watcher.Events:
+				if !ok {
+					panic("TODO: implement")
+				}
+				m.onChange(event.Name)
+			case err, ok := <-m.Watcher.Errors:
+				if !ok {
+					panic("TODO: implement")
+				}
+				log.Println("error from fsnotify:", err)
+			case <-ctx.Done():
+				log.Println(ctx.Err())
+				return
+			}
+		}
+	}()
 }
 
 // Watch does watch a file or a directory. If a directory is passed, it watches
 // all its contents, files and subdirectories, recursively.
 func (m *FileMonitor) Watch(path string) error {
+	re := regexp.MustCompile(`^/host_mnt/([a-z]+)`)
+	path = re.ReplaceAllString(path, `$1:`)
+	path = filepath.FromSlash(path)
+
+	err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return errors.Wrapf(err, "error traversing path %s", path)
+		}
+		if !info.IsDir() {
+			// We don't monitor files directly.
+			return nil
+		}
+		return m.Watcher.Add(path)
+	})
+	if err != nil {
+		return errors.Wrapf(err, "error walking path %s", path)
+	}
 	return nil
 }
