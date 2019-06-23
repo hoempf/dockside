@@ -261,7 +261,7 @@ func (d *Dockwatch) getMounts(ctx context.Context, containerID string) ([]*Mount
 	}
 	for _, v := range mm.Mounts {
 		if v.Type == mount.TypeBind && v.RW {
-			// We only consider writable AND readable bind-mounts.
+			// We only consider read/write bind-mounts.
 			mounts = append(mounts, &Mount{
 				SrcPath: v.Source,
 				DstPath: v.Destination,
