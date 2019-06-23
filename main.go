@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 )
@@ -15,6 +16,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("could create new dockwatch: %v", err)
 	}
+
+	d.OnStart(func(c *Container) {
+		fmt.Println("container started", c)
+	})
+
+	d.OnStop(func(c *Container) {
+		fmt.Println("container stopped", c)
+	})
 
 	if err := d.WatchContainer(); err != nil {
 		log.Fatalf("could watch Docker daemon: %v", err)

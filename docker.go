@@ -64,21 +64,25 @@ func (l *ContainerList) String() string {
 }
 
 // Upsert inserts a container to the list in case it doesn't exist. If it does
-// exist it updates the item in the list.
-func (l *ContainerList) Upsert(c *Container) {
+// exist it updates the item in the list. It returns the container
+// inserted/updated and true if the element already existed and has been
+// updated, false otherwise.
+func (l *ContainerList) Upsert(c *Container) (*Container, bool) {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 	for k, v := range l.list {
 		if v.Equals(c) {
 			l.list[k] = c
-			return
+			return c, true
 		}
 	}
 	l.list = append(l.list, c)
+	return c, false
 }
 
-// Remove container with specified ID.
-func (l *ContainerList) Remove(id string) {
+// Remove container with specified ID. It returns the container which has been
+// removed, nil if the container didn't exist.
+func (l *ContainerList) Remove(id string) *Container {
 	l.mux.Lock()
 	defer l.mux.Unlock()
 	// Get index of container by ID.
@@ -90,9 +94,10 @@ func (l *ContainerList) Remove(id string) {
 		// removed and shorten the slice.
 		l.list[k] = l.list[len(l.list)-1]
 		l.list = l.list[:len(l.list)-1]
-		return
+		return v
 	}
 	// Remove is idempotent.
+	return nil
 }
 
 // Len returns the lenght of the list.
@@ -115,11 +120,20 @@ type Mount struct {
 	DstPath string // Destination bind-mount path in the container.
 }
 
+// OnStart is a function called when a container is started/unpaused etc.
+type OnStart func(*Container)
+
+// OnStop is a function called when a container is stopped etc.
+type OnStop func(*Container)
+
 // Dockwatch interfaces with Docker API.
 type Dockwatch struct {
 	Client *client.Client // The Docker API client.
-	list   *ContainerList // A list of containers to watch and update.
 
+	onStart OnStart // Callback when containers start.
+	onStop  OnStop  // Callback when containers stop.
+
+	list   *ContainerList // A list of containers to watch and update.
 	ctx    context.Context
 	events <-chan events.Message
 	errors <-chan error
@@ -153,6 +167,19 @@ func (d *Dockwatch) initEventListeners() {
 
 func (d *Dockwatch) String() string {
 	return d.list.String()
+}
+
+// OnStart sets the callback function called when containers are started. We
+// make sure it is called only once per state transition.
+func (d *Dockwatch) OnStart(f OnStart) {
+	d.onStart = f
+}
+
+// OnStop sets the callback function called when containers are stopped. We make
+// sure it is called only once per state transition. E.g. `stop` followed by
+// `destroy` will only call this once.
+func (d *Dockwatch) OnStop(f OnStop) {
+	d.onStop = f
 }
 
 // WatchContainer keeps an internally updated list of running containers. It
@@ -210,13 +237,18 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 			log.Printf("could not inspect mounts: %v", err)
 			mounts = make([]*Mount, 0)
 		}
-		d.list.Upsert(&Container{
+		c, updated := d.list.Upsert(&Container{
 			ID:     ev.Actor.ID,
 			Name:   ev.Actor.Attributes["name"],
 			Mounts: mounts,
 		})
+		if !updated {
+			d.onStart(c)
+		}
 	case "stop", "kill", "die", "pause", "destroy":
-		d.list.Remove(ev.Actor.ID)
+		if old := d.list.Remove(ev.Actor.ID); old != nil {
+			d.onStop(old)
+		}
 	}
 }
 
