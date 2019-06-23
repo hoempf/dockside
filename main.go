@@ -24,6 +24,7 @@ func main() {
 	defer fs.Close()
 	fs.OnChange(func(path string) {
 		log.Println("file changed", path)
+		d.ForwardChange(path)
 	})
 	fs.Start(ctx)
 

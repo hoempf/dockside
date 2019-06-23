@@ -71,13 +71,27 @@ func (m *FileMonitor) Start(ctx context.Context) {
 	}()
 }
 
-// Watch does watch a file or a directory. If a directory is passed, it watches
-// all its contents, files and subdirectories, recursively.
-func (m *FileMonitor) Watch(path string) error {
+// PathFromDocker returns a docker path in Docker for Windows where
+// `host_mnt/<drive-letter>` is replaced with <drive-letter>:\
+func PathFromDocker(path string) string {
 	re := regexp.MustCompile(`^/host_mnt/([a-z]+)`)
 	path = re.ReplaceAllString(path, `$1:`)
 	path = filepath.FromSlash(path)
+	return path
+}
 
+// PathFromWindows does the opposite of `PathFromDocker`.
+func PathFromWindows(path string) string {
+	path = filepath.ToSlash(path)
+	re := regexp.MustCompile(`^([a-zA-Z]+):`)
+	path = re.ReplaceAllString(path, `/host_mnt/$1`)
+	return path
+}
+
+// Watch does watch a file or a directory. If a directory is passed, it watches
+// all its contents, files and subdirectories, recursively.
+func (m *FileMonitor) Watch(path string) error {
+	path = PathFromDocker(path)
 	err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return errors.Wrapf(err, "error traversing path %s", path)

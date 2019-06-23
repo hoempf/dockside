@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
@@ -114,6 +115,17 @@ func (l *ContainerList) Reset() {
 	l.list = l.list[:0]
 }
 
+// Walk through the list and execute f for each item encountered. It stops
+// walking if the func returns an error.
+func (l *ContainerList) Walk(f func(*Container) error) error {
+	for _, v := range l.list {
+		if err := f(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Mount is a bind-mount into a container.
 type Mount struct {
 	SrcPath string // Source path on the host.
@@ -219,6 +231,42 @@ func (d *Dockwatch) WatchContainer() error {
 	}()
 
 	return nil
+}
+
+// ForwardChange proxies the file system notification event into the container
+// by issuing `chmod <path>` (docker exec). It does not `touch` because that
+// would end up in an infinite loop.
+func (d *Dockwatch) ForwardChange(path string) error {
+	err := d.list.Walk(func(c *Container) error {
+		for _, v := range c.Mounts {
+			p := strings.Replace(PathFromWindows(path), v.SrcPath, "", 1)
+			if p == "" {
+				continue
+			}
+			dst := v.DstPath + p
+
+			cmd := []string{
+				fmt.Sprintf(`perms = stat -c %%a %s`, dst),
+				"&&",
+				fmt.Sprintf(`chmod $perms %s`, dst),
+			}
+			execCfg := types.ExecConfig{
+				Cmd: cmd,
+			}
+			id, err := d.Client.ContainerExecCreate(d.ctx, c.ID, execCfg)
+			if err != nil {
+				return errors.Wrapf(err, "cannot create exec in container %s", c.ID)
+			}
+			ctx, cancel := context.WithTimeout(d.ctx, time.Minute) // 1 min. should be more than enough.
+			defer cancel()
+			err = d.Client.ContainerExecStart(ctx, id.ID, types.ExecStartCheck{})
+			if err != nil {
+				return errors.Wrapf(err, "cannot start exec inside container %s", c.ID)
+			}
+		}
+		return nil
+	})
+	return err
 }
 
 // handleEvent .
