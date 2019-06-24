@@ -4,12 +4,17 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"time"
 )
 
 func main() {
+	var workersFlag int
+	flag.IntVar(&workersFlag, "-n", 10, "number of parallel workers to start")
+	flag.Parse()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d, err := NewDockwatch(ctx)
@@ -27,6 +32,7 @@ func main() {
 		d.ForwardChange(path)
 	})
 	fs.Start(ctx)
+	d.Start(workersFlag)
 
 	d.OnStart(func(c *Container) {
 		fmt.Println("container started", c)

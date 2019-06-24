@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -150,6 +151,7 @@ type Dockwatch struct {
 	ctx    context.Context
 	events <-chan events.Message
 	errors <-chan error
+	work   chan *Event
 }
 
 // NewDockwatch returns a new Dockwatch instance with a Docker API client.
@@ -162,6 +164,7 @@ func NewDockwatch(ctx context.Context) (*Dockwatch, error) {
 		Client: cli,
 		list:   NewContainerList(),
 		ctx:    ctx,
+		work:   make(chan *Event),
 	}
 
 	d.initEventListeners()
@@ -195,6 +198,82 @@ func (d *Dockwatch) OnStop(f OnStopFunc) {
 	d.onStop = f
 }
 
+// Start the event goroutines with n workers.
+func (d *Dockwatch) Start(n int) {
+	queues := make(map[string]chan *Event)
+
+	out := make(chan *Event)
+	log.Printf("starting %d workers", n)
+	for i := 0; i < n; i++ {
+		go func() {
+			for ev := range out {
+				err := d.executeChmod(ev)
+				if err != nil {
+					log.Printf("could not execute chmod inside container %s: %v", ev.Container.ID, err)
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(out)
+		for ev := range d.work {
+			cid := ev.Container.ID
+			qu, ok := queues[cid]
+			if !ok {
+				// Setup a new queue and attach out channel.
+				qu = make(chan *Event)
+				go d.coalesce(qu, out)
+				queues[cid] = qu
+			}
+			qu <- ev
+		}
+	}()
+}
+
+// coalesce buffers Events for a short time. It tries to update multiple
+// files/dirs at once inside containers without having to launch a `docker exec`
+// process for each file. It also filters repeated change notification of the
+// same file during one cycle.
+func (d *Dockwatch) coalesce(in <-chan *Event, out chan<- *Event) {
+	timer := time.NewTimer(0) // Fires immediately, but we're going to reset it.
+	var (
+		timerCh <-chan time.Time
+		outCh   chan<- *Event
+		event   *Event
+		oldEv   *Event
+	)
+	for {
+		var err error
+		select {
+		case ev := <-in:
+			if event == nil {
+				event = ev
+			} else {
+				oldEv = event
+				event, err = event.Merge(ev)
+			}
+			if err != nil {
+				// Fire immediately and put the new event in front of the buffer.
+				// In theory this should not happen.
+				out <- oldEv
+				event = ev
+			}
+
+			if timerCh == nil {
+				timer.Reset(500 * time.Millisecond) //TODO: Make this configurable.
+				timerCh = timer.C
+			}
+		case <-timerCh:
+			outCh = out
+			timerCh = nil // This skips the channel during the next evaluation of `case`.
+		case outCh <- event:
+			event = nil
+			outCh = nil // This skips the channel during the next evaluation of `case`.
+		}
+	}
+}
+
 // WatchContainer keeps an internally updated list of running containers. It
 // watches Docker events.
 func (d *Dockwatch) WatchContainer() error {
@@ -210,6 +289,7 @@ func (d *Dockwatch) WatchContainer() error {
 	// Watch docker events for container creation / stopping so we have an
 	// accurate list.
 	go func() {
+		defer close(d.work)
 		for {
 			select {
 			case ev := <-d.events:
@@ -246,14 +326,14 @@ func (d *Dockwatch) ForwardChange(path string) error {
 				continue
 			}
 			dst := v.DstPath + p
-
 			ev := &Event{
 				Container: c,
 				Files:     []string{dst},
 			}
-			err := d.executeChmod(ev)
-			if err != nil {
-				return errors.Wrapf(err, "could not execute chmod inside container %s", c)
+			select {
+			case d.work <- ev:
+			case <-d.ctx.Done():
+				return d.ctx.Err()
 			}
 		}
 		return nil
@@ -280,7 +360,7 @@ func (d *Dockwatch) executeChmod(e *Event) error {
 	}
 
 	// This timeout for the execution should be more than enough. If
-	// this takes longer we can assume there's a deeper problem present.
+	// this takes longer we can assume there's a deeper problem.
 	ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
 	defer cancel()
 
@@ -313,19 +393,60 @@ type Event struct {
 	Files     []string
 }
 
-// Merge two events.
+// NewEvent creates a new event.
+func NewEvent() *Event {
+	e := &Event{
+		Files: make([]string, 0),
+	}
+	return e
+}
+
+// Merge two events. Returns an error if the events could not be merged.
 func (e *Event) Merge(other *Event) (*Event, error) {
 	if !e.Container.Equals(other.Container) {
 		return nil, fmt.Errorf("events cannot be merged, containers don't match: %s %s", e.Container, other.Container)
 	}
-	ev := &Event{
-		Container: e.Container,
-		Files:     append(e.Files, other.Files...),
-	}
+
+	ev := NewEvent()
+	ev.Container = e.Container
+	ev.Files = append(e.Files, other.Files...)
+	// We only need unique files in one single batch.
+	ev.Files = sortUnique(ev.Files)
+
 	return ev, nil
 }
 
-//func (d *Dockwatch) coalesce(in <-chan Event, out chan<- Event)
+// sortUnique does in-place deduplication of a []string. See
+// https://github.com/golang/go/wiki/SliceTricks
+func sortUnique(in []string) []string {
+	sort.Strings(in)
+	j := 0
+	for i := 1; i < len(in); i++ {
+		if in[j] == in[i] {
+			continue
+		}
+		j++
+		in[j] = in[i]
+	}
+	return in[:j+1]
+}
+
+// Contains returns true if an event with the same target file exists. It also
+// check for container equality. If not equal it returns false because a file
+// with the same name could exist in different containers.
+func (e *Event) Contains(other *Event) bool {
+	if !e.Container.Equals(other.Container) {
+		return false
+	}
+	for _, v1 := range other.Files {
+		for _, v2 := range e.Files {
+			if v1 == v2 {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // handleEvent .
 func (d *Dockwatch) handleEvent(ev events.Message) {
@@ -338,7 +459,7 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 
 	switch ev.Action {
 	case "start", "unpause":
-		d.start(ev.Actor.ID, ev.Actor.Attributes["name"])
+		d.containerStarted(ev.Actor.ID, ev.Actor.Attributes["name"])
 	case "stop", "kill", "die", "pause", "destroy":
 		if old := d.list.Remove(ev.Actor.ID); old != nil && d.onStop != nil {
 			d.onStop(old)
@@ -351,7 +472,7 @@ func (d *Dockwatch) handleErrors(err error) {
 	fmt.Printf("%v\n", err)
 }
 
-func (d *Dockwatch) start(containerID, name string) {
+func (d *Dockwatch) containerStarted(containerID, name string) {
 	mounts, err := d.getMounts(d.ctx, containerID)
 	if err != nil {
 		log.Printf("could not inspect mounts: %v", err)
@@ -377,7 +498,7 @@ func (d *Dockwatch) resetContainerList() error {
 	}
 
 	for _, v := range list {
-		d.start(v.ID, strings.Join(v.Names, " "))
+		d.containerStarted(v.ID, strings.Join(v.Names, " "))
 	}
 
 	log.Println("reset container list:")
