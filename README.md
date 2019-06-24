@@ -18,18 +18,18 @@ source file system). It then forwards those change notifications inside the
 running containers by issuing a `chmod` to the files changed so `inotify` and
 other mechanism inside the (linux) container can act accordingly.
 
-## Why chmod was chosen
+## Why I chose chmod
 
 `chmod` is not supported by NTFS and therefore will not circle back if used
 inside the container.
 
 ## How to use
 
-Make sure those environment variables are set correctly (the usually are if you
-installed Docker for Windows):
+Make sure the Docker environment variables are set correctly (they usually are
+if you installed Docker for Windows).
 
 ```sh
-DOCKER_HOST="tcp://0.0.0.0:2375"
+export DOCKER_HOST="tcp://0.0.0.0:2375"
 dockside.exe
 ```
 
@@ -49,3 +49,17 @@ GOOS=windows go build
 
 **NOTE:** It may compile for Linux but this doesn't make sense, and probably
 would result in an infinite loop when forwarding via `chmod`.
+
+## Bugs / Tests
+
+There are certainly a few bugs in here. I should add a few more tests. If you
+spot something bad, open an issue or send a PR, suggestions and/or bug reports
+are very welcome.
+
+## Builds / Binaries
+
+Working on it :)
+
+## Contributions
+
+If you need/want/fix anything, please let me know.
