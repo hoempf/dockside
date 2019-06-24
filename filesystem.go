@@ -115,3 +115,24 @@ func (m *FileMonitor) Watch(path string) error {
 	}
 	return nil
 }
+
+// Unwatch stops watching the path. It unwatches all subdirectories and files
+// recursively.
+func (m *FileMonitor) Unwatch(path string) error {
+	path = PathFromDocker(path)
+	err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return errors.Wrapf(err, "error traversing path %s", path)
+		}
+		if !info.IsDir() {
+			// Since we don't monitor files directly we also don't "unmonitor"
+			// them :)
+			return nil
+		}
+		return m.Watcher.Remove(path)
+	})
+	if err != nil {
+		return errors.Wrapf(err, "error walking path %s", path)
+	}
+	return nil
+}

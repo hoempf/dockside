@@ -217,9 +217,10 @@ func (d *Dockwatch) WatchContainer() error {
 				d.handleEvent(ev)
 			case err := <-d.errors:
 				if err == io.EOF {
-					// Reinit the event stream.
-					log.Printf("got EOF on error channel of docker events: %v", err)
-					d.initEventListeners()
+					// The stream disconnected. Consider this a fatal error.
+					// Trying to recreate a connection to a dead daemon would
+					// spin endlessly.
+					log.Fatalf("got EOF on error channel of docker events: %v", err)
 				}
 				// Handle other errors.
 				d.handleErrors(err)
@@ -246,51 +247,85 @@ func (d *Dockwatch) ForwardChange(path string) error {
 			}
 			dst := v.DstPath + p
 
-			// Prepare the "docker exec" command.
-			cmd := []string{
-				"sh",
-				"-c",
-				fmt.Sprintf(`chmod $(stat -c %%a %s) %s`, dst, dst),
+			ev := &Event{
+				Container: c,
+				Files:     []string{dst},
 			}
-			execCfg := types.ExecConfig{
-				Cmd:          cmd,
-				Tty:          false,
-				AttachStdout: true,
-				AttachStderr: true,
-			}
-			id, err := d.Client.ContainerExecCreate(d.ctx, c.ID, execCfg)
+			err := d.executeChmod(ev)
 			if err != nil {
-				return errors.Wrapf(err, "cannot create exec in container %s", c.ID)
-			}
-
-			// This timeout for the execution should be more than enough. If
-			// this takes longer we can assume there's a deeper problem present.
-			ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
-			defer cancel()
-
-			// During execution of the command attach a reader.
-			resp, err := d.Client.ContainerExecAttach(d.ctx, id.ID, execCfg)
-			if err != nil {
-				return errors.Wrapf(err, "cannot connect stderr/stdout to exec process")
-			}
-			defer resp.Close()
-
-			// Execute the "docker exec" command.
-			err = d.Client.ContainerExecStart(ctx, id.ID, types.ExecStartCheck{})
-			if err != nil {
-				return errors.Wrapf(err, "cannot start exec inside container %s", c.ID)
-			}
-
-			// Read back what happened.
-			scanner := bufio.NewScanner(resp.Reader)
-			for scanner.Scan() {
-				fmt.Println(scanner.Text())
+				return errors.Wrapf(err, "could not execute chmod inside container %s", c)
 			}
 		}
 		return nil
 	})
 	return err
 }
+
+func (d *Dockwatch) executeChmod(e *Event) error {
+	// Prepare the "docker exec" command.
+	cmd := []string{
+		"sh",
+		"-c",
+		fmt.Sprintf(`for i in %s; do chmod $(stat -c %%a $i) $i; done`, strings.Join(e.Files, " ")),
+	}
+	execCfg := types.ExecConfig{
+		Cmd:          cmd,
+		Tty:          false,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	id, err := d.Client.ContainerExecCreate(d.ctx, e.Container.ID, execCfg)
+	if err != nil {
+		return errors.Wrapf(err, "cannot create exec in container %s", e.Container.ID)
+	}
+
+	// This timeout for the execution should be more than enough. If
+	// this takes longer we can assume there's a deeper problem present.
+	ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
+	defer cancel()
+
+	// During execution of the command attach a reader.
+	resp, err := d.Client.ContainerExecAttach(d.ctx, id.ID, execCfg)
+	if err != nil {
+		return errors.Wrapf(err, "cannot connect stderr/stdout to exec process")
+	}
+	defer resp.Close()
+
+	// Execute the "docker exec" command.
+	err = d.Client.ContainerExecStart(ctx, id.ID, types.ExecStartCheck{})
+	if err != nil {
+		return errors.Wrapf(err, "cannot start exec inside container %s", e.Container.ID)
+	}
+
+	// Read back what happened.
+	scanner := bufio.NewScanner(resp.Reader)
+	for scanner.Scan() {
+		fmt.Println(scanner.Text())
+	}
+
+	return nil
+}
+
+// Event is an update to the file system which needs to be propagated into the
+// container.
+type Event struct {
+	Container *Container
+	Files     []string
+}
+
+// Merge two events.
+func (e *Event) Merge(other *Event) (*Event, error) {
+	if !e.Container.Equals(other.Container) {
+		return nil, fmt.Errorf("events cannot be merged, containers don't match: %s %s", e.Container, other.Container)
+	}
+	ev := &Event{
+		Container: e.Container,
+		Files:     append(e.Files, other.Files...),
+	}
+	return ev, nil
+}
+
+//func (d *Dockwatch) coalesce(in <-chan Event, out chan<- Event)
 
 // handleEvent .
 func (d *Dockwatch) handleEvent(ev events.Message) {
@@ -303,19 +338,7 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 
 	switch ev.Action {
 	case "start", "unpause":
-		mounts, err := d.getMounts(d.ctx, ev.Actor.ID)
-		if err != nil {
-			log.Printf("could not inspect mounts: %v", err)
-			mounts = make([]*Mount, 0)
-		}
-		c, updated := d.list.Upsert(&Container{
-			ID:     ev.Actor.ID,
-			Name:   ev.Actor.Attributes["name"],
-			Mounts: mounts,
-		})
-		if !updated && d.onStart != nil {
-			d.onStart(c)
-		}
+		d.start(ev.Actor.ID, ev.Actor.Attributes["name"])
 	case "stop", "kill", "die", "pause", "destroy":
 		if old := d.list.Remove(ev.Actor.ID); old != nil && d.onStop != nil {
 			d.onStop(old)
@@ -328,6 +351,22 @@ func (d *Dockwatch) handleErrors(err error) {
 	fmt.Printf("%v\n", err)
 }
 
+func (d *Dockwatch) start(containerID, name string) {
+	mounts, err := d.getMounts(d.ctx, containerID)
+	if err != nil {
+		log.Printf("could not inspect mounts: %v", err)
+		mounts = make([]*Mount, 0)
+	}
+	c, updated := d.list.Upsert(&Container{
+		ID:     containerID,
+		Name:   name,
+		Mounts: mounts,
+	})
+	if !updated && d.onStart != nil {
+		d.onStart(c)
+	}
+}
+
 // resetContainerList updates the internal list. It deletes all current entries
 // and fetches a fresh list from the Docker daemon.
 func (d *Dockwatch) resetContainerList() error {
@@ -338,16 +377,7 @@ func (d *Dockwatch) resetContainerList() error {
 	}
 
 	for _, v := range list {
-		mounts, err := d.getMounts(d.ctx, v.ID)
-		if err != nil {
-			return errors.Wrap(err, "could not inspect mounts")
-		}
-
-		d.list.Upsert(&Container{
-			ID:     v.ID,
-			Name:   strings.TrimSpace(strings.Join(v.Names, " ")),
-			Mounts: mounts,
-		})
+		d.start(v.ID, strings.Join(v.Names, " "))
 	}
 
 	log.Println("reset container list:")

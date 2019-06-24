@@ -33,13 +33,19 @@ func main() {
 		// Get the mounts and start watching them.
 		for _, mount := range c.Mounts {
 			if err := fs.Watch(mount.SrcPath); err != nil {
-				log.Printf("error watching file %s: %v", mount.SrcPath, err)
+				log.Printf("error watching path %s: %v", mount.SrcPath, err)
 			}
 		}
 	})
 
 	d.OnStop(func(c *Container) {
 		fmt.Println("container stopped", c)
+		// Unwatch the mounts of this container.
+		for _, mount := range c.Mounts {
+			if err := fs.Unwatch(mount.SrcPath); err != nil {
+				log.Printf("error unwatching path %s: %v", mount.SrcPath, err)
+			}
+		}
 	})
 
 	if err := d.WatchContainer(); err != nil {
