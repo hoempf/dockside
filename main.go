@@ -1,12 +1,12 @@
-// Dockside is a quickly wrote file system change watcher which propagates those
-// changes into volumes mounted in Docker for Windows automatically.
+// Dockside is a file system change watcher which propagates those changes into
+// volumes mounted in Docker for Windows automatically.
 package main
 
 import (
 	"context"
 	"flag"
 	"log"
-	"time"
+	"sync"
 )
 
 func main() {
@@ -18,7 +18,7 @@ func main() {
 	defer cancel()
 	d, err := NewDockwatch(ctx)
 	if err != nil {
-		log.Fatalf("could create new dockwatch: %v", err)
+		log.Fatalf("could not create new dockwatch: %v", err)
 	}
 
 	fs, err := NewFileMonitor()
@@ -30,8 +30,16 @@ func main() {
 		log.Println("file changed", path)
 		d.ForwardChange(path)
 	})
-	fs.Start(ctx)
-	d.Start(workersFlag)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := fs.Start(ctx)
+		if err != nil {
+			log.Printf("error from file system watcher: %v", err)
+		}
+	}()
 
 	d.OnStart(func(c *Container) {
 		log.Println("container started", c)
@@ -42,7 +50,6 @@ func main() {
 			}
 		}
 	})
-
 	d.OnStop(func(c *Container) {
 		log.Println("container stopped", c)
 		// Unwatch the mounts of this container.
@@ -52,10 +59,11 @@ func main() {
 			}
 		}
 	})
+	d.Start(workersFlag)
 
 	if err := d.WatchContainer(); err != nil {
-		log.Fatalf("could watch Docker daemon: %v", err)
+		log.Fatalf("could not watch Docker daemon: %v", err)
 	}
 
-	time.Sleep(time.Minute * 15)
+	wg.Wait()
 }

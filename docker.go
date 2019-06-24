@@ -155,7 +155,9 @@ type Dockwatch struct {
 	ctx    context.Context
 	events <-chan events.Message
 	errors <-chan error
-	work   chan *Event
+	work   chan *Event            // Work channel for new events.
+	queues map[string]chan *Event // Queues for each container.
+	mux    sync.Mutex             // Protects queues.
 }
 
 // NewDockwatch returns a new Dockwatch instance with a Docker API client.
@@ -169,6 +171,7 @@ func NewDockwatch(ctx context.Context) (*Dockwatch, error) {
 		list:   NewContainerList(),
 		ctx:    ctx,
 		work:   make(chan *Event),
+		queues: make(map[string]chan *Event),
 	}
 
 	d.initEventListeners()
@@ -204,8 +207,6 @@ func (d *Dockwatch) OnStop(f OnStopFunc) {
 
 // Start the event goroutines with n workers.
 func (d *Dockwatch) Start(n int) {
-	queues := make(map[string]chan *Event)
-
 	out := make(chan *Event)
 	log.Printf("starting %d workers", n)
 	for i := 0; i < n; i++ {
@@ -222,14 +223,16 @@ func (d *Dockwatch) Start(n int) {
 	go func() {
 		defer close(out)
 		for ev := range d.work {
+			d.mux.Lock()
 			cid := ev.Container.ID
-			qu, ok := queues[cid]
+			qu, ok := d.queues[cid]
 			if !ok {
 				// Setup a new queue and attach out channel.
 				qu = make(chan *Event)
 				go d.coalesce(qu, out)
-				queues[cid] = qu
+				d.queues[cid] = qu
 			}
+			d.mux.Unlock()
 			qu <- ev
 		}
 	}()
@@ -284,7 +287,7 @@ func (d *Dockwatch) WatchContainer() error {
 	ctx := d.ctx
 	if d.list.Len() == 0 {
 		// We started just now so the list is empty. Get all containers running
-		// now and matching the name.
+		// now.
 		if err := d.resetContainerList(); err != nil {
 			return errors.Wrap(err, "could not reset container list")
 		}
@@ -466,7 +469,12 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 		d.containerStarted(ev.Actor.ID, ev.Actor.Attributes["name"])
 	case "stop", "kill", "die", "pause", "destroy":
 		if old := d.list.Remove(ev.Actor.ID); old != nil && d.onStop != nil {
+			d.mux.Lock()
+			defer d.mux.Unlock()
 			d.onStop(old)
+			// Also remove the queue from the list.
+			log.Printf("remove %s from queue list", ev.Actor.ID)
+			delete(d.queues, ev.Actor.ID)
 		}
 	}
 }

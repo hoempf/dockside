@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,35 +47,33 @@ func (m *FileMonitor) OnChange(f OnChangeFunc) {
 	m.onChange = f
 }
 
-// Start watching for file system notifications.
-func (m *FileMonitor) Start(ctx context.Context) {
-	go func() {
-		for {
-			select {
-			case event, ok := <-m.Watcher.Events:
-				if !ok {
-					panic("TODO: implement")
-				}
-				if event.Op == fsnotify.Remove {
-					// File has been removed, so it can't be chmodded anymore.
-					// The container doesn't get the delete notification either
-					// though. We also can't create the same file and delete it
-					// in the container because it would most certainly cause an
-					// infinite loop.
-					continue
-				}
-				m.onChange(event.Name)
-			case err, ok := <-m.Watcher.Errors:
-				if !ok {
-					panic("TODO: implement")
-				}
-				log.Println("error from fsnotify:", err)
-			case <-ctx.Done():
-				log.Println(ctx.Err())
-				return
+// Start watching for file system notifications. This blocks and returns only if
+// there was an error.
+func (m *FileMonitor) Start(ctx context.Context) error {
+	for {
+		select {
+		case event, ok := <-m.Watcher.Events:
+			if !ok {
+				panic("TODO: implement")
 			}
+			if event.Op == fsnotify.Remove {
+				// File has been removed, so it can't be chmodded anymore.
+				// The container doesn't get the delete notification either
+				// though. We also can't create the same file and delete it
+				// in the container because it would most certainly cause an
+				// infinite loop.
+				continue
+			}
+			m.onChange(event.Name)
+		case err, ok := <-m.Watcher.Errors:
+			if !ok {
+				panic("TODO: implement")
+			}
+			return errors.Wrap(err, "error from docker error channel")
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-	}()
+	}
 }
 
 // PathFromDocker returns a docker path in Docker for Windows where
