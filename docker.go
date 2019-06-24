@@ -134,6 +134,10 @@ type Mount struct {
 	DstPath string // Destination bind-mount path in the container.
 }
 
+func (m *Mount) String() string {
+	return fmt.Sprintf("{src:%s, dst:%s}", m.SrcPath, m.DstPath)
+}
+
 // OnStartFunc is a function called when a container is started/unpaused etc.
 type OnStartFunc func(*Container)
 

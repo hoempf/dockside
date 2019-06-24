@@ -1,0 +1,12 @@
+---
+blacklist:
+  - GPL-2.0
+
+whitelist:
+  - Apache-2.0
+  - NewBSD
+  - MIT
+  - FreeBSD
+
+exceptions:
+  - github.com/opencontainers/go-digest

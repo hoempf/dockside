@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"time"
 )
@@ -35,7 +34,7 @@ func main() {
 	d.Start(workersFlag)
 
 	d.OnStart(func(c *Container) {
-		fmt.Println("container started", c)
+		log.Println("container started", c)
 		// Get the mounts and start watching them.
 		for _, mount := range c.Mounts {
 			if err := fs.Watch(mount.SrcPath); err != nil {
@@ -45,7 +44,7 @@ func main() {
 	})
 
 	d.OnStop(func(c *Container) {
-		fmt.Println("container stopped", c)
+		log.Println("container stopped", c)
 		// Unwatch the mounts of this container.
 		for _, mount := range c.Mounts {
 			if err := fs.Unwatch(mount.SrcPath); err != nil {
