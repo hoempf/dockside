@@ -31,3 +31,5 @@ changelog:
 release:
   github:
     owner: hoempf
+    name: dockside
+  name_template: '{{.Tag}}'
