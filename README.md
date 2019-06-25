@@ -58,7 +58,7 @@ are very welcome.
 
 ## Builds / Binaries
 
-See the [releases](https://github.com/hoempf/dockside) page.
+See the [releases](https://github.com/hoempf/dockside/releases) page.
 
 ## Contributions
 
