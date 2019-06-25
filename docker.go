@@ -172,6 +172,7 @@ func NewDockwatch(ctx context.Context) (*Dockwatch, error) {
 		ctx:    ctx,
 		work:   make(chan *Event),
 		queues: make(map[string]chan *Event),
+		//mountrefs:
 	}
 
 	d.initEventListeners()
@@ -366,17 +367,17 @@ func (d *Dockwatch) executeChmod(e *Event) error {
 		return errors.Wrapf(err, "cannot create exec in container %s", e.Container.ID)
 	}
 
-	// This timeout for the execution should be more than enough. If
-	// this takes longer we can assume there's a deeper problem.
-	ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
-	defer cancel()
-
 	// During execution of the command attach a reader.
 	resp, err := d.Client.ContainerExecAttach(d.ctx, id.ID, execCfg)
 	if err != nil {
 		return errors.Wrapf(err, "cannot connect stderr/stdout to exec process")
 	}
 	defer resp.Close()
+
+	// This timeout for the execution should be more than enough. If
+	// this takes longer we can assume there's a deeper problem.
+	ctx, cancel := context.WithTimeout(d.ctx, time.Minute)
+	defer cancel()
 
 	// Execute the "docker exec" command.
 	err = d.Client.ContainerExecStart(ctx, id.ID, types.ExecStartCheck{})
@@ -386,8 +387,15 @@ func (d *Dockwatch) executeChmod(e *Event) error {
 
 	// Read back what happened.
 	scanner := bufio.NewScanner(resp.Reader)
-	for scanner.Scan() {
-		fmt.Println(scanner.Text())
+	select {
+	case <-func() chan struct{} {
+		for scanner.Scan() {
+			log.Println(scanner.Text())
+		}
+		return nil
+	}():
+	case <-d.ctx.Done():
+		return d.ctx.Err()
 	}
 
 	return nil
@@ -481,7 +489,7 @@ func (d *Dockwatch) handleEvent(ev events.Message) {
 
 // handleErrors .
 func (d *Dockwatch) handleErrors(err error) {
-	fmt.Printf("%v\n", err)
+	log.Printf("%v\n", err)
 }
 
 func (d *Dockwatch) containerStarted(containerID, name string) {

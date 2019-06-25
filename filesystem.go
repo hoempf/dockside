@@ -15,6 +15,7 @@ import (
 type FileMonitor struct {
 	Watcher *fsnotify.Watcher
 
+	wrefs    *Counter // Counts references to watchers (multiple containers mounting the same dir).
 	onChange OnChangeFunc
 }
 
@@ -29,6 +30,7 @@ func NewFileMonitor() (*FileMonitor, error) {
 	}
 	m := &FileMonitor{
 		Watcher: w,
+		wrefs:   NewCounter(),
 	}
 	return m, nil
 }
@@ -105,6 +107,7 @@ func (m *FileMonitor) Watch(path string) error {
 			// We don't monitor files directly.
 			return nil
 		}
+		m.wrefs.Inc(path)
 		return m.Watcher.Add(path)
 	})
 	if err != nil {
@@ -126,7 +129,10 @@ func (m *FileMonitor) Unwatch(path string) error {
 			// them :)
 			return nil
 		}
-		return m.Watcher.Remove(path)
+		if n := m.wrefs.Dec(path); n <= 0 {
+			return m.Watcher.Remove(path)
+		}
+		return nil
 	})
 	if err != nil {
 		return errors.Wrapf(err, "error walking path %s", path)
