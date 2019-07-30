@@ -28,7 +28,9 @@ func main() {
 	defer fs.Close()
 	fs.OnChange(func(path string) {
 		log.Println("file changed", path)
-		d.ForwardChange(path)
+		if err := d.ForwardChange(path); err != nil {
+			log.Printf("error during change forwarding: %s", err)
+		}
 	})
 
 	var wg sync.WaitGroup

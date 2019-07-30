@@ -301,7 +301,7 @@ func (d *Dockwatch) WatchContainer() error {
 		for {
 			select {
 			case ev := <-d.events:
-				log.Printf("got event from Docker: %s %s", ev.Action, ev.Actor.ID)
+				//log.Printf("got event from Docker: %s %s", ev.Action, ev.Actor.ID)
 				d.handleEvent(ev)
 			case err := <-d.errors:
 				if err == io.EOF {
@@ -327,7 +327,9 @@ func (d *Dockwatch) WatchContainer() error {
 // by issuing `chmod <path>` (docker exec). It does not `touch` because that
 // would end up in an infinite loop.
 func (d *Dockwatch) ForwardChange(path string) error {
+	log.Printf("container count: %d", d.list.Len())
 	err := d.list.Walk(func(c *Container) error {
+		log.Printf("mounts on container %s: %d", c.Name, len(c.Mounts))
 		for _, v := range c.Mounts {
 			p := strings.Replace(PathFromWindows(path), v.SrcPath, "", 1)
 			if p == "" {
@@ -380,6 +382,7 @@ func (d *Dockwatch) executeChmod(e *Event) error {
 	defer cancel()
 
 	// Execute the "docker exec" command.
+	log.Printf("execute cmd in container %s: %s", e.Container.ID, cmd)
 	err = d.Client.ContainerExecStart(ctx, id.ID, types.ExecStartCheck{})
 	if err != nil {
 		return errors.Wrapf(err, "cannot start exec inside container %s", e.Container.ID)
@@ -394,8 +397,8 @@ func (d *Dockwatch) executeChmod(e *Event) error {
 		}
 		return nil
 	}():
-	case <-d.ctx.Done():
-		return d.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
 	return nil
